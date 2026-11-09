@@ -403,7 +403,7 @@ paths:
       description: |
         Atomically cancels an open Spot LIMIT order and creates a new LIMIT order in one request.
 
-        Required scope: **create orders**. Both order creation and cancellation must be enabled for the account and asset pair.
+        Required scope: **Create Orders**. Both order creation and cancellation must be enabled for the account and asset pair.
 
         ### Replacement Rules
 
