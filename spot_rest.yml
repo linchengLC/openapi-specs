@@ -394,6 +394,193 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
+  /viewer/order/replace:
+    post:
+      tags:
+        - Order
+      summary: Replace Order
+      operationId: replaceOrder
+      description: |
+        Atomically cancels an open Spot LIMIT order and creates a new LIMIT order in one request.
+
+        Required scope: **create orders**. Both order creation and cancellation must be enabled for the account and asset pair.
+
+        ### Replacement Rules
+
+        - Identify the old order with exactly one of `order_id` or `client_order_id`. Unlike the get-order endpoint, providing both valid identifiers is an error.
+        - The old and new orders must belong to the authenticated user and have the same asset pair and side. Both must be ordinary LIMIT orders without IOC or stop-order settings. An old order may be partially filled, but must still be open with an unfilled amount.
+        - Send a complete `new_order`, including a required new `client_order_id` that differs from the old order's client ID. It follows the existing create-order format and uniqueness rules (1–36 letters, digits, hyphens or underscores; unique within the existing 24-hour retention window).
+        - Only `price`, `amount`, and `post_only` may change. `type` defaults to `LIMIT`; `post_only` defaults to `false` and does not inherit the old value. Omit `stop_price` and `operator`; nonzero `stop_price` or a nonempty `operator` is rejected. `immediate_or_cancel` must be omitted or `false`.
+        - `amount` is the complete base-asset quantity of the new order, independent of the old order's amount and fills. For an old amount of `0.5` with `0.2` filled, a new amount of `0.25` creates a new order for `0.25`; the old `0.2` fill remains unchanged.
+        - Prices and amounts follow existing LIMIT validation: price is truncated to `quote_scale`, amount to `base_scale`, and both must remain positive. Minimum order value, maximum order value, price protection, and trading restrictions still apply.
+        - The old order's remaining locked funds can fund the replacement. If they are insufficient together with available funds, the whole replacement is rejected.
+        - A successful replacement receives a new order ID and a new queue position, even when only reducing the amount or sending unchanged price, amount, and `post_only` settings. The old order's fills are preserved. The new order may immediately fill unless `post_only` is `true`.
+        - A confirmed business rejection leaves the old order and its queue priority unchanged by this replacement. If `post_only` would take liquidity, the whole replacement is rejected with code `10007`. Normal fills or cancellations can still occur before or after the replacement is processed.
+
+        Success returns `code: 0` with `data.cancelled_order` (`CANCELLED`) and `data.new_order` (`PENDING` or `FILLED`). These are the orders at replacement execution time; later queries return their latest visible state. Existing create, cancel, and query endpoints retain their behavior. This change adds a REST endpoint only; it does not add a WebSocket trading method.
+
+        ### Outcome Unknown
+
+        :::warning[Do Not Automatically Retry]
+        HTTP `408` with code `41202` and message `replace outcome unknown` means the request may already have executed. A lost response or network timeout also does not prove failure.
+
+        Keep the old order identifier and the submitted new `client_order_id`. Query [Get Order by ID or Client ID](/docs/spot/rest/get-order) with the new client ID and, if needed, query the old order. Finding the new order confirms that it was accepted; a short-lived not-found result does not prove failure because order queries may lag.
+
+        Until the outcome is resolved, do not automatically submit another Replace or Create request and do not reuse the new client ID for any other order. If queries cannot resolve the outcome, retain the request details and contact support. Repeating this POST creates a new attempt, not a query for the original result; the endpoint does not replay a prior response or provide request-level idempotency across retries or restarts.
+        :::
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceOrderBody'
+            examples:
+              by_order_id:
+                summary: Replace by old order ID
+                value:
+                  order_id: 12345678
+                  new_order:
+                    asset_pair_name: BTC-USDT
+                    side: BID
+                    price: "50100"
+                    amount: "0.25"
+                    type: LIMIT
+                    post_only: true
+                    client_order_id: replace-btc-002
+              by_client_order_id:
+                summary: Replace by old client order ID
+                value:
+                  client_order_id: original-btc-001
+                  new_order:
+                    asset_pair_name: BTC-USDT
+                    side: BID
+                    price: "50100"
+                    amount: "0.25"
+                    client_order_id: replace-btc-002
+      responses:
+        '200':
+          description: Replacement confirmed; the old order is cancelled and the new order is accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaceOrderResponse'
+              example:
+                code: 0
+                data:
+                  cancelled_order:
+                    id: 12345678
+                    asset_pair_name: BTC-USDT
+                    price: "50000"
+                    amount: "0.5"
+                    filled_amount: "0.2"
+                    avg_deal_price: "50000"
+                    side: BID
+                    state: CANCELLED
+                    created_at: "2026-11-09T01:00:00Z"
+                    updated_at: "2026-11-09T01:01:00Z"
+                    type: LIMIT
+                    stop_price: "0"
+                    immediate_or_cancel: false
+                    post_only: true
+                    client_order_id: original-btc-001
+                  new_order:
+                    id: 12345679
+                    asset_pair_name: BTC-USDT
+                    price: "50100"
+                    amount: "0.25"
+                    filled_amount: "0"
+                    avg_deal_price: "0"
+                    side: BID
+                    state: PENDING
+                    created_at: "2026-11-09T01:01:00Z"
+                    updated_at: "2026-11-09T01:01:00Z"
+                    type: LIMIT
+                    stop_price: "0"
+                    immediate_or_cancel: false
+                    post_only: true
+                    client_order_id: replace-btc-002
+        '400':
+          description: Confirmed rejection. The replacement does not change the old order. Existing LIMIT price and amount errors also apply.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_identifiers:
+                  value:
+                    code: 10007
+                    message: exactly one of order_id or client_order_id is required
+                post_only_would_take:
+                  value:
+                    code: 10007
+                    message: 'order/invalid: replace post-only would take'
+                insufficient_funds:
+                  value:
+                    code: 10014
+                    message: Insufficient funds
+                duplicate_client_id:
+                  value:
+                    code: 54041
+                    message: duplicate order
+                old_order_not_open:
+                  value:
+                    code: 54043
+                    message: unknown opening order
+                liquidity_limit:
+                  value:
+                    code: 50047
+                    message: Liquidity taken too much
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Permission denied, trading restricted, or order creation/cancellation disabled. The replacement is not submitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                permission_denied:
+                  value:
+                    code: 10403
+                    message: Permission denied
+                order_creation_disabled:
+                  value:
+                    code: 40304
+                    message: Creating order is forbidden
+                account_restricted:
+                  value:
+                    code: 40305
+                    message: Account restricted
+                pair_suspended:
+                  value:
+                    code: 60100
+                    message: Asset pair is suspended
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          description: Pending order request limit exceeded. The replacement is not submitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: 40621
+                message: Max Order Exceed
+        '408':
+          description: Replacement outcome unknown. Reconcile using order queries; do not automatically retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: 41202
+                message: replace outcome unknown
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /viewer/orders/{id}:
     get:
       tags:
@@ -824,6 +1011,128 @@ components:
         client_order_id:
           type: string
           description: A user-specified order ID for tracking and cancellation. Must be unique within 24 hours.
+
+    ReplaceOrderBody:
+      type: object
+      description: Provide exactly one nonzero order_id or nonempty client_order_id for the old order, plus a complete new_order.
+      required: [new_order]
+      example:
+        order_id: 12345678
+        new_order:
+          asset_pair_name: BTC-USDT
+          side: BID
+          price: "50100"
+          amount: "0.25"
+          type: LIMIT
+          post_only: true
+          client_order_id: replace-btc-002
+      oneOf:
+        - required: [order_id]
+          properties:
+            order_id:
+              minimum: 1
+        - required: [client_order_id]
+          properties:
+            client_order_id:
+              minLength: 1
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The old order ID. Use this or the top-level client_order_id, not both. Zero does not identify an order.
+          example: 12345678
+        client_order_id:
+          type: string
+          description: The old order's client ID. Use this or order_id, not both. This is distinct from new_order.client_order_id.
+          example: original-btc-001
+        new_order:
+          $ref: '#/components/schemas/ReplaceLimitOrderBody'
+
+    ReplaceLimitOrderBody:
+      type: object
+      description: A complete new Spot LIMIT order. Asset pair and side must match the old order; price, amount and post_only are not inherited.
+      required: [asset_pair_name, side, price, amount, client_order_id]
+      properties:
+        asset_pair_name:
+          type: string
+          description: The same asset pair as the old order.
+          example: BTC-USDT
+        side:
+          type: string
+          enum: [ASK, BID]
+          description: The same side as the old order. ASK = sell, BID = buy.
+          example: BID
+        price:
+          type: string
+          description: The new limit price, positive after truncation to the asset pair's quote_scale. Existing LIMIT value and price-protection rules apply.
+          example: "50100"
+        amount:
+          type: string
+          description: The new order's full base-asset quantity, positive after truncation to base_scale. Independent of the old amount and fills.
+          example: "0.25"
+        type:
+          type: string
+          enum: [LIMIT]
+          default: LIMIT
+          description: Only ordinary LIMIT orders are supported. Omit to use LIMIT.
+          example: LIMIT
+        immediate_or_cancel:
+          type: boolean
+          enum: [false]
+          default: false
+          description: IOC is not supported. Omit or set to false.
+          example: false
+        post_only:
+          type: boolean
+          default: false
+          description: If true, reject the entire replacement when the new order would take liquidity; preserve the old order and its priority. Defaults to false, without inheriting the old setting.
+          example: true
+        client_order_id:
+          type: string
+          minLength: 1
+          maxLength: 36
+          pattern: '^[a-zA-Z0-9-_]{1,36}$'
+          description: Required new client order ID, different from the old order's client ID. Uses existing create-order format and uniqueness rules. Do not reuse it while a replacement outcome is unknown.
+          example: replace-btc-002
+
+    ReplaceOrderResponse:
+      type: object
+      description: Confirmed atomic replacement result, using the standard API success envelope.
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+          description: Zero indicates a confirmed successful replacement.
+          example: 0
+        data:
+          type: object
+          description: The old and new orders at replacement execution time. Later queries may return updated states.
+          required: [cancelled_order, new_order]
+          properties:
+            cancelled_order:
+              description: The old order after cancellation; previous fills and its original amount are preserved.
+              allOf:
+                - $ref: '#/components/schemas/Order'
+                - type: object
+                  properties:
+                    state:
+                      type: string
+                      enum: [CANCELLED]
+                      description: The old order is cancelled.
+                      example: CANCELLED
+            new_order:
+              description: A new order with a new ID and queue position; starts with independent fill totals and may fill immediately.
+              allOf:
+                - $ref: '#/components/schemas/Order'
+                - type: object
+                  properties:
+                    state:
+                      type: string
+                      enum: [PENDING, FILLED]
+                      description: The accepted new order is open or fully filled.
+                      example: PENDING
 
     CancelOrderBody:
       type: object
