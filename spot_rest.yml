@@ -394,18 +394,18 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/InternalError'
-  /viewer/order/replace:
+  /viewer/order/cancel_replace:
     post:
       tags:
         - Order
-      summary: Replace Order
-      operationId: replaceOrder
+      summary: Cancel Replace Order
+      operationId: cancelReplaceOrder
       description: |
         Atomically cancels an open Spot LIMIT order and creates a new LIMIT order in one request.
 
         Required scope: **Create Orders**. Both order creation and cancellation must be enabled for the account and asset pair.
 
-        ### Replacement Rules
+        ### Cancel and Replace Rules
 
         - Identify the old order with exactly one of `order_id` or `client_order_id`. Unlike the get-order endpoint, providing both valid identifiers is an error.
         - The old and new orders must belong to the authenticated user and have the same asset pair and side. Both must be ordinary LIMIT orders without IOC or stop-order settings. An old order may be partially filled, but must still be open with an unfilled amount.
@@ -422,11 +422,11 @@ paths:
         ### Outcome Unknown
 
         :::warning[Do Not Automatically Retry]
-        HTTP `408` with code `41202` and message `replace outcome unknown` means the request may already have executed. A lost response or network timeout also does not prove failure.
+        HTTP `408` with code `41202` and message `cancelReplace outcome unknown` means the request may already have executed. A lost response or network timeout also does not prove failure.
 
         Keep the old order identifier and the submitted new `client_order_id`. Query [Get Order by ID or Client ID](/docs/spot/rest/get-order) with the new client ID and, if needed, query the old order. Finding the new order confirms that it was accepted; a short-lived not-found result does not prove failure because order queries may lag.
 
-        Until the outcome is resolved, do not automatically submit another Replace or Create request and do not reuse the new client ID for any other order. If queries cannot resolve the outcome, retain the request details and contact support. Repeating this POST creates a new attempt, not a query for the original result; the endpoint does not replay a prior response or provide request-level idempotency across retries or restarts.
+        Until the outcome is resolved, do not automatically submit another CancelReplace or Create request and do not reuse the new client ID for any other order. If queries cannot resolve the outcome, retain the request details and contact support. Repeating this POST creates a new attempt, not a query for the original result; the endpoint does not replay a prior response or provide request-level idempotency across retries or restarts.
         :::
       security:
         - bearerAuth: []
@@ -435,7 +435,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ReplaceOrderBody'
+              $ref: '#/components/schemas/CancelReplaceOrderBody'
             examples:
               by_order_id:
                 summary: Replace by old order ID
@@ -465,7 +465,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReplaceOrderResponse'
+                $ref: '#/components/schemas/CancelReplaceOrderResponse'
               example:
                 code: 0
                 data:
@@ -515,7 +515,7 @@ paths:
                 post_only_would_take:
                   value:
                     code: 10007
-                    message: 'order/invalid: replace post-only would take'
+                    message: 'order/invalid: cancelReplace post-only would take'
                 insufficient_funds:
                   value:
                     code: 10014
@@ -576,7 +576,7 @@ paths:
                 $ref: '#/components/schemas/Error'
               example:
                 code: 41202
-                message: replace outcome unknown
+                message: cancelReplace outcome unknown
         '429':
           $ref: '#/components/responses/TooManyRequests'
         '500':
@@ -1012,7 +1012,7 @@ components:
           type: string
           description: A user-specified order ID for tracking and cancellation. Must be unique within 24 hours.
 
-    ReplaceOrderBody:
+    CancelReplaceOrderBody:
       type: object
       description: Provide exactly one nonzero order_id or nonempty client_order_id for the old order, plus a complete new_order.
       required: [new_order]
@@ -1027,29 +1027,39 @@ components:
           post_only: true
           client_order_id: replace-btc-002
       oneOf:
-        - required: [order_id]
+        - title: By Order ID
+          type: object
+          required: [order_id]
           properties:
             order_id:
+              type: integer
+              format: int64
               minimum: 1
-        - required: [client_order_id]
+              description: The old order ID. Use this or the top-level client_order_id, not both. Zero does not identify an order.
+              example: 12345678
+            client_order_id:
+              type: string
+              maxLength: 0
+              description: Omit when using order_id. If provided, this must be an empty string.
+        - title: By Client Order ID
+          type: object
+          required: [client_order_id]
           properties:
             client_order_id:
+              type: string
               minLength: 1
+              description: The old order's client ID. Use this or order_id, not both. This is distinct from new_order.client_order_id.
+              example: original-btc-001
+            order_id:
+              type: integer
+              format: int64
+              enum: [0]
+              description: Omit when using client_order_id. If provided, this must be zero.
       properties:
-        order_id:
-          type: integer
-          format: int64
-          minimum: 0
-          description: The old order ID. Use this or the top-level client_order_id, not both. Zero does not identify an order.
-          example: 12345678
-        client_order_id:
-          type: string
-          description: The old order's client ID. Use this or order_id, not both. This is distinct from new_order.client_order_id.
-          example: original-btc-001
         new_order:
-          $ref: '#/components/schemas/ReplaceLimitOrderBody'
+          $ref: '#/components/schemas/CancelReplaceLimitOrderBody'
 
-    ReplaceLimitOrderBody:
+    CancelReplaceLimitOrderBody:
       type: object
       description: A complete new Spot LIMIT order. Asset pair and side must match the old order; price, amount and post_only are not inherited.
       required: [asset_pair_name, side, price, amount, client_order_id]
@@ -1096,7 +1106,7 @@ components:
           description: Required new client order ID, different from the old order's client ID. Uses existing create-order format and uniqueness rules. Do not reuse it while a replacement outcome is unknown.
           example: replace-btc-002
 
-    ReplaceOrderResponse:
+    CancelReplaceOrderResponse:
       type: object
       description: Confirmed atomic replacement result, using the standard API success envelope.
       required: [code, data]
